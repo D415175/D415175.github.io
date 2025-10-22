@@ -1,0 +1,19 @@
+{
+  "Planilha1": [
+    {
+      "Posto": "Mineiros",
+      "Latitude": -1753158,
+      "Longitude": -5253291
+    },
+    {
+      "Posto": "Paranaguá",
+      "Latitude": -2557149,
+      "Longitude": -4857582
+    },
+    {
+      "Posto": "Camaquã",
+      "Latitude": -3085329,
+      "Longitude": -5180288
+    }
+  ]
+}

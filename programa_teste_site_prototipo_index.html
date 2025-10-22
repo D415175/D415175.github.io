@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Programa Teste Site — Mapa de Postos</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+
+  <style>
+    :root{--accent:#0b6b5c;--muted:#666}
+    html,body,#map{height:100%;margin:0}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;display:flex;flex-direction:column}
+    header{display:flex;align-items:center;gap:12px;padding:12px;background:linear-gradient(90deg,var(--accent),#128f74);color:white}
+    header img{height:36px;width:36px;border-radius:6px;object-fit:cover}
+    header h1{font-size:1rem;margin:0}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .controls input[type=text]{padding:8px;border-radius:6px;border:1px solid #ddd;min-width:180px}
+    .controls label{font-size:0.85rem;color:var(--muted)}
+    .topbar{padding:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    .file-wrap{display:flex;gap:8px;align-items:center}
+    #map{flex:1;min-height:320px}
+    .sidebar{position:fixed;right:12px;top:92px;width:260px;max-height:70vh;background:rgba(255,255,255,0.95);box-shadow:0 6px 18px rgba(0,0,0,0.12);border-radius:10px;padding:10px;overflow:auto}
+    .marker-list{list-style:none;padding:0;margin:0}
+    .marker-list li{padding:6px;border-bottom:1px solid #eee;font-size:0.95rem}
+    .small{font-size:0.85rem;color:var(--muted)}
+    .status{font-size:0.9rem;color:#fff;background:rgba(0,0,0,0.2);padding:6px;border-radius:6px}
+    @media(max-width:700px){.sidebar{position:static;width:100%;max-height:200px;border-radius:8px;margin:8px}} 
+  </style>
+</head>
+<body>
+  <header>
+    <img src="icon.png" alt="Ícone do programa" onerror="this.style.display='none'"/>
+    <div>
+      <h1>Programa Teste Site</h1>
+      <div class="small">Mapa interativo — postos carregados do último upload</div>
+    </div>
+  </header>
+
+  <div class="topbar">
+    <div class="file-wrap">
+      <label class="small">Arquivo (XLSX/CSV):</label>
+      <input type="file" id="file-input" accept=".xlsx,.csv" />
+      <button id="load-sample">Carregar exemplo</button>
+    </div>
+
+    <div class="controls">
+      <label class="small">Pesquisar cidade:</label>
+      <input type="text" id="city-search" placeholder="Ex: Araraquara, SP" />
+      <button id="search-btn">Ir</button>
+      <label class="small">Raio (km): <span id="radius-val">25</span></label>
+      <input type="range" id="radius" min="1" max="200" value="25" />
+    </div>
+  </div>
+
+  <div id="map"></div>
+
+  <aside class="sidebar" id="sidebar">
+    <strong>Postos visíveis</strong>
+    <ul class="marker-list" id="marker-list"></ul>
+    <div style="padding-top:8px" class="small">Dica: salve esta página como atalho no celular para usar como app. Para instalar como app (PWA), acesse via HTTPS ou localhost.</div>
+  </aside>
+
+  <!-- External libraries loaded dynamically for resilience -->
+  <script>
+  // Load a script by URL and return a Promise
+  function loadScript(url){
+    return new Promise((resolve,reject)=>{
+      const s = document.createElement('script');
+      s.src = url;
+      s.onload = ()=>resolve();
+      s.onerror = ()=>reject(new Error('Falha ao carregar script: '+url));
+      document.head.appendChild(s);
+    });
+  }
+
+  // Try to ensure Leaflet and XLSX are loaded before running main
+  async function ensureDeps(){
+    const libs = [];
+    if(typeof window.L === 'undefined'){
+      libs.push(loadScript('https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'));
+    }
+    if(typeof window.XLSX === 'undefined'){
+      libs.push(loadScript('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'));
+    }
+    return Promise.all(libs);
+  }
+
+  // main app logic in a function
+  async function initApp(){
+    try{
+      await ensureDeps();
+    }catch(err){
+      console.error(err);
+      alert('Erro ao carregar bibliotecas externas. Verifique sua conexão e tente novamente. Detalhes no console.');
+      return;
+    }
+
+    // --- Configurações iniciais ---
+    const map = L.map('map').setView([-21.78, -48.17], 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    let markers = []; // {layer, data}
+    const markerListEl = document.getElementById('marker-list');
+    const radiusInput = document.getElementById('radius');
+    const radiusVal = document.getElementById('radius-val');
+    radiusInput.addEventListener('input', ()=>{radiusVal.textContent = radiusInput.value; applyFilter();});
+
+    // custom icon (expects icon.png next to index.html)
+    const customIcon = L.icon({
+      iconUrl: 'icon.png',
+      iconSize: [38,38],
+      iconAnchor: [19,38]
+    });
+
+    function haversineKm(lat1,lon1,lat2,lon2){
+      const toRad = x=>x*Math.PI/180;
+      const R=6371;
+      const dlat=toRad(lat2-lat1);const dlon=toRad(lon2-lon1);
+      const a=Math.sin(dlat/2)*Math.sin(dlat/2)+Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dlon/2)*Math.sin(dlon/2);
+      const c=2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+      return R*c;
+    }
+
+    function clearMarkers(){markers.forEach(m=>map.removeLayer(m.layer));markers=[];markerListEl.innerHTML='';}
+
+    function addMarker(data){
+      const lat = parseFloat(data.Latitude);
+      const lon = parseFloat(data.Longitude);
+      if(Number.isNaN(lat) || Number.isNaN(lon)) return;
+      const layer = L.marker([lat,lon], {icon: customIcon});
+      layer.addTo(map);
+      layer.bindPopup(`<strong>${escapeHtml(data.Posto)}</strong><br/>Lat: ${lat.toFixed(6)}, Lon: ${lon.toFixed(6)}`);
+      markers.push({layer, data});
+    }
+
+    function escapeHtml(s){return (''+s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"})[c]);}
+
+    // read workbook and extract first sheet
+    function handleWorkbook(wb){
+      const firstSheet = wb.Sheets[wb.SheetNames[0]];
+      const json = XLSX.utils.sheet_to_json(firstSheet, {defval:''});
+      // expect headers: Posto, Latitude, Longitude
+      clearMarkers();
+      json.forEach(row=>addMarker(row));
+      applyFilter();
+      fitMapToMarkers();
+    }
+
+    // handle JSON array of postos (for automatic load)
+    function handlePostosArray(arr){
+      if(!Array.isArray(arr)) return;
+      clearMarkers();
+      arr.forEach(row=>{
+        // accept both lowercase or capitalized keys
+        const normalized = {
+          Posto: row.Posto || row.posto || row.name || row.Name || '',
+          Latitude: row.Latitude || row.latitude || row.lat || row.Lat || '',
+          Longitude: row.Longitude || row.longitude || row.lon || row.Lon || ''
+        };
+        addMarker(normalized);
+      });
+      applyFilter();
+      fitMapToMarkers();
+    }
+
+    // Try to fetch postos.json (this is the Option 1 workflow). If found, load it automatically.
+    async function tryLoadPostosJson(){
+      try{
+        const resp = await fetch('postos.json', {cache:'no-cache'});
+        if(!resp.ok) throw new Error('no json');
+        const data = await resp.json();
+        handlePostosArray(data);
+        console.log('postos.json carregado automaticamente');
+        return true;
+      }catch(err){
+        console.log('postos.json não encontrado — carregando amostra (use posts.json para produção)');
+        return false;
+      }
+    }
+
+    // file input handling (this does NOT persist to server when hosted estaticamente)
+    // Use this only for preview on the client. For persistent updates, replace the postos.json
+    // file on the server/repo with the JSON generated from the lab's Excel (see instructions below).
+    document.getElementById('file-input').addEventListener('change', async (e)=>{
+      const f=e.target.files[0]; if(!f) return;
+      const buf = await f.arrayBuffer();
+      let wb;
+      if(f.name.toLowerCase().endsWith('.csv')){
+        const text = new TextDecoder('utf-8').decode(buf);
+        wb = XLSX.read(text, {type:'string', raw:false});
+      }else{
+        wb = XLSX.read(buf, {type:'array'});
+      }
+      handleWorkbook(wb);
+      alert('Preview carregado — nota: este upload é apenas local. Para atualizar para todos os usuários, o laboratório deve converter a planilha para postos.json e substituir o arquivo no servidor conforme instruções.');
+    });
+
+    // sample data loader
+    document.getElementById('load-sample').addEventListener('click', ()=>{
+      const csv=`Posto,Latitude,Longitude
+Posto Alfa,-21.7865,-48.1734
+Posto Beta,-21.7751,-48.1689
+Posto Gama,-21.7900,-48.1802`;
+      const wb = XLSX.read(csv, {type:'string'});
+      handleWorkbook(wb);
+    });
+
+    function fitMapToMarkers(){
+      if(markers.length===0) return;
+      const group = L.featureGroup(markers.map(m=>m.layer));
+      map.fitBounds(group.getBounds().pad(0.15));
+    }
+
+    // geocode city using Nominatim
+    async function geocodeCity(q){
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1`;
+      const resp = await fetch(url, {headers:{'Accept':'application/json','User-Agent':'ProgramaTesteSite/1.0 (github.com)'}});
+      if(!resp.ok) throw new Error('Falha na geocodificação');
+      const data = await resp.json();
+      if(data.length===0) throw new Error('Cidade não encontrada');
+      return {lat:parseFloat(data[0].lat), lon:parseFloat(data[0].lon), display_name:data[0].display_name};
+    }
+
+    document.getElementById('search-btn').addEventListener('click', async ()=>{
+      const q = document.getElementById('city-search').value.trim(); if(!q) return;
+      try{
+        const res = await geocodeCity(q);
+        map.setView([res.lat,res.lon], 12);
+        applyFilter();
+      }catch(err){alert(err.message)}
+    });
+
+    // apply filter: show only markers within radius km from map center
+    function applyFilter(){
+      const center = map.getCenter();
+      const r = parseFloat(radiusInput.value); // km
+      let visible = 0;
+      markerListEl.innerHTML='';
+      markers.forEach(m=>{
+        const lat = parseFloat(m.data.Latitude);
+        const lon = parseFloat(m.data.Longitude);
+        const dist = haversineKm(center.lat, center.lng, lat, lon);
+        if(dist <= r){
+          if(!map.hasLayer(m.layer)) m.layer.addTo(map);
+          visible++;
+          const li = document.createElement('li');
+          li.innerHTML = `<strong>${escapeHtml(m.data.Posto)}</strong><br/><span class='small'>${dist.toFixed(2)} km</span>`;
+          markerListEl.appendChild(li);
+        }else{
+          if(map.hasLayer(m.layer)) map.removeLayer(m.layer);
+        }
+      });
+      if(visible===0) markerListEl.innerHTML='<li class="small">Nenhum posto no raio selecionado. Tente aumentar o raio ou mover o mapa.</li>';
+    }
+
+    // reapply filter when user moves the map
+    map.on('moveend', applyFilter);
+
+    // Try to load postos.json; if not present, fall back to sample
+    const loaded = await tryLoadPostosJson();
+    if(!loaded){
+      document.getElementById('load-sample').click();
+    }
+
+    // --- PWA: simple manifest generator and service worker registration ---
+    // create a manifest blob so the page can be added to homescreen
+    const manifest = {
+      name: "Programa Teste Site",
+      short_name: "TesteSite",
+      start_url: ".",
+      display: "standalone",
+      background_color: "#ffffff",
+      description: "Mapa interativo de postos - Programa Teste Site",
+      icons: [
+        {src: 'icon.png', sizes:'192x192', type:'image/png'},
+        {src: 'icon.png', sizes:'512x512', type:'image/png'}
+      ]
+    };
+    const manifestBlob = new Blob([JSON.stringify(manifest)], {type: 'application/json'});
+    const manifestURL = URL.createObjectURL(manifestBlob);
+    const link = document.createElement('link'); link.rel='manifest'; link.href=manifestURL; document.head.appendChild(link);
+
+    // basic service worker registration (optional). For dev: works on localhost or HTTPS
+    if('serviceWorker' in navigator){
+      navigator.serviceWorker.register('sw.js').catch(()=>console.warn('Não foi possível registrar service worker (ok em localhost/HTTPS).'));
+    }
+
+  } // end initApp
+
+  // Run when DOM is ready
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', initApp);
+  }else{
+    initApp();
+  }
+  </script>
+
+  <!-- Service Worker file contents (sw.js) - save this text into a file named sw.js next to index.html -->
+  <!--
+  // sw.js
+  const CACHE_NAME = 'prog-testesite-v1';
+  const FILES_TO_CACHE = ['index.html','icon.png','postos.json'];
+  self.addEventListener('install', evt=>{evt.waitUntil(caches.open(CACHE_NAME).then(cache=>cache.addAll(FILES_TO_CACHE)));self.skipWaiting();});
+  self.addEventListener('activate', evt=>{evt.waitUntil(clients.claim());});
+  self.addEventListener('fetch', evt=>{evt.respondWith(caches.match(evt.request).then(r=>r || fetch(evt.request)));});
+  -->
+
+  <!-- Instruções rápidas (também salvas neste arquivo):
+    1) Coloque ao lado deste index.html os arquivos: icon.png (ícone do seu posto) e sw.js (conteúdo acima) e, para produção, postos.json (arquivo gerado a partir do Excel).
+    2) Para testar localmente com service worker, rode um servidor (ex: python -m http.server 8000) e acesse http://localhost:8000
+    3) Para hospedar online gratuitamente: crie um repositório no GitHub, push destes arquivos, e ative o GitHub Pages (branch main / root). Alternativa: Netlify ou Vercel (arrastar e soltar).
+    4) Para gerar postos.json a partir da planilha Teste Site.xlsx (colunas: Posto, Latitude, Longitude), use o script Python abaixo e envie o arquivo postos.json gerado para o servidor:
+
+    --- Python (gera postos.json a partir de um .xlsx) ---
+    ```python
+    import pandas as pd
+    df = pd.read_excel('Teste Site.xlsx')
+    # garanta que as colunas estejam corretas
+    df = df.rename(columns=lambda c: c.strip())
+    df = df[['Posto','Latitude','Longitude']]
+    df.to_json('postos.json', orient='records', force_ascii=False)
+    ```
+
+    5) Substitua o `postos.json` no repositório do site (GitHub Pages / Netlify) sempre que o laboratório atualizar a planilha. O site carregará automaticamente o novo arquivo.
+    6) A busca de cidade usa Nominatim (OpenStreetMap). Ao pesquisar, o mapa centraliza e os postos mostrados ficam apenas os dentro do raio (km) selecionado.
+  -->
+</body>
+</html>
